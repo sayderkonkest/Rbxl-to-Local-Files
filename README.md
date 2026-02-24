@@ -6,5 +6,5 @@ Tips:
 
 Example video: https://www.youtube.com/watch?v=umbHd09k0q8
 
-##### Download [here](https://github.com/sayderkonkest/Rbxl-to-Local-Files/releases)
+##### Download [here](https://github.com/sayderkonkest/Rbxl-to-Local-Files/releases).
 ##### Made with [Lune](https://lune-org.github.io/docs/).
