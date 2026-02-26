@@ -22,6 +22,11 @@ local DEFAULT_SERVICES = {
 	"TextChatService",
 }
 
+-- Maps service names to their Roblox DataModel class names (when different)
+local SERVICE_CLASS_OVERRIDES = {
+	Workspace = "Workspace",
+}
+
 -- Instances that behave like folders (create a directory and process children)
 local FOLDER_LIKE_CLASSES = {
 	Folder = true,
@@ -137,6 +142,145 @@ local function exportServices(game: Instance, selectedServices: { string })
 	end
 end
 
+-- Serializes an attribute value into the Rojo JSON format
+local function serializeAttributeValue(value: any): string?
+	local t = typeof(value)
+
+	if t == "boolean" then
+		return tostring(value)
+	elseif t == "number" then
+		-- Distinguish between integers and floats
+		if value == math.floor(value) and math.abs(value) < 2^53 then
+			return tostring(math.floor(value))
+		else
+			return tostring(value)
+		end
+	elseif t == "string" then
+		-- Escape special characters in JSON strings
+		local escaped = value
+			:gsub("\\", "\\\\")
+			:gsub('"', '\\"')
+			:gsub("\n", "\\n")
+			:gsub("\r", "\\r")
+			:gsub("\t", "\\t")
+		return '"' .. escaped .. '"'
+	elseif t == "Vector3" then
+		return '{"Vector3": [' .. value.X .. ", " .. value.Y .. ", " .. value.Z .. "]}"
+	elseif t == "Vector2" then
+		return '{"Vector2": [' .. value.X .. ", " .. value.Y .. "]}"
+	elseif t == "Color3" then
+		-- Rojo expects Color3 as an array of [R, G, B] floats (0–1)
+		return '{"Color3": [' .. value.R .. ", " .. value.G .. ", " .. value.B .. "]}"
+	elseif t == "UDim" then
+		return '{"UDim": [' .. value.Scale .. ", " .. value.Offset .. "]}"
+	elseif t == "UDim2" then
+		return '{"UDim2": [[' .. value.X.Scale .. ", " .. value.X.Offset .. "], [" .. value.Y.Scale .. ", " .. value.Y.Offset .. "]]}"
+	elseif t == "Rect" then
+		return '{"Rect": [[' .. value.Min.X .. ", " .. value.Min.Y .. "], [" .. value.Max.X .. ", " .. value.Max.Y .. "]]}"
+	elseif t == "NumberRange" then
+		return '{"NumberRange": [' .. value.Min .. ", " .. value.Max .. "]}"
+	elseif t == "CFrame" then
+		local p = value.Position
+		local rx, ry, rz = value:ToEulerAnglesXYZ()
+		return '{"CFrame": [[' .. p.X .. ", " .. p.Y .. ", " .. p.Z .. "], [" .. rx .. ", " .. ry .. ", " .. rz .. "]]}"
+	elseif t == "BrickColor" then
+		return '{"BrickColor": ' .. value.Number .. "}"
+	else
+		-- Unsupported type; skip this attribute
+		return nil
+	end
+end
+
+-- Builds a $attributes JSON block from an instance's attribute table
+local function buildAttributesBlock(instance: Instance, indent: string): string?
+	local attrs = instance:GetAttributes()
+	if not next(attrs) then
+		return nil
+	end
+
+	local entries = {}
+	for key, value in attrs do
+		local serialized = serializeAttributeValue(value)
+		if serialized then
+			table.insert(entries, indent .. '\t"' .. key .. '": ' .. serialized)
+		else
+			writeColored("yellow", `  [WARN] Attribute "{key}" on "{instance.Name}" has unsupported type "{typeof(value)}", skipping.\n`)
+		end
+	end
+
+	if #entries == 0 then
+		return nil
+	end
+
+	return indent .. '"$attributes": {\n' .. table.concat(entries, ",\n") .. "\n" .. indent .. "}"
+end
+
+-- Builds a $tags JSON block from an instance's tag list
+local function buildTagsBlock(instance: Instance, indent: string): string?
+	local tags = instance:GetTags()
+	if #tags == 0 then
+		return nil
+	end
+
+	local entries = {}
+	for _, tag in tags do
+		local escaped = tag:gsub("\\", "\\\\"):gsub('"', '\\"')
+		table.insert(entries, '"' .. escaped .. '"')
+	end
+
+	return indent .. '"$tags": [' .. table.concat(entries, ", ") .. "]"
+end
+
+-- Generates a default.project.json compatible with LSP
+local function generateProjectJson(selectedServices: { string }, projectName: string, game: Instance)
+	-- Build the tree entries for each selected service
+	local serviceEntries = {}
+	for _, serviceName in selectedServices do
+		local className = SERVICE_CLASS_OVERRIDES[serviceName] or serviceName
+		local service = game:FindFirstChild(serviceName)
+
+		local extraFields = {}
+
+		if service then
+			local attrsBlock = buildAttributesBlock(service, "\t\t\t")
+			if attrsBlock then
+				table.insert(extraFields, attrsBlock)
+			end
+
+			local tagsBlock = buildTagsBlock(service, "\t\t\t")
+			if tagsBlock then
+				table.insert(extraFields, tagsBlock)
+			end
+		end
+
+		local entry = '\t\t"' .. serviceName .. '": {\n'
+			.. '\t\t\t"$className": "' .. className .. '",\n'
+			.. '\t\t\t"$path": "src/' .. serviceName .. '"'
+
+		if #extraFields > 0 then
+			entry = entry .. ",\n" .. table.concat(extraFields, ",\n") .. "\n"
+		else
+			entry = entry .. "\n"
+		end
+
+		entry = entry .. "\t\t}"
+		table.insert(serviceEntries, entry)
+	end
+
+	local treeBody = table.concat(serviceEntries, ",\n")
+
+	local json = "{\n"
+		.. '\t"name": "' .. projectName .. '",\n'
+		.. '\t"tree": {\n'
+		.. '\t\t"$className": "DataModel",\n'
+		.. treeBody .. "\n"
+		.. "\t}\n"
+		.. "}"
+
+	fs.writeFile("./default.project.json", json)
+	writeColored("green", `  [OK] "default.project.json" generated successfully.\n`)
+end
+
 -- Prompts and validates the path to the .rbxl file
 local function promptFilePath(): string
 	while true do
@@ -165,10 +309,23 @@ local function promptServices(): { string }
 	return selected
 end
 
+-- Prompts for the project name used in default.project.json
+local function promptProjectName(): string
+	writeColored("reset", `Project name (default: "my-project"): `)
+	local name = readLineClean()
+
+	if name == "" then
+		return "my-project"
+	end
+
+	return name
+end
+
 -- Main loop
 while true do
 	local filePath = promptFilePath()
 	local selectedServices = promptServices()
+	local projectName = promptProjectName()
 
 	stdio.write("\n")
 
@@ -176,6 +333,6 @@ while true do
 	local game = roblox.deserializePlace(rawPlace)
 
 	exportServices(game, selectedServices)
-
+	generateProjectJson(selectedServices, projectName, game)
 	writeColored("reset", "\nExport complete.\n")
 end
